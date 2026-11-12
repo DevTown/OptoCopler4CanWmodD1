@@ -29,7 +29,7 @@ struct Settings {
 } sett;
 
 // callback function for status information
-std::function<void(char*)> statusCallback;
+std::function<void(const char*)> statusCallback;
 
 //flag for saving data
 bool shouldSaveConfig = false;
@@ -83,7 +83,7 @@ void initiateFactoryReset()
   }
 }
 
-void setup_wifi(std::function<void(char*)> func = 0) {
+void setup_wifi(std::function<void(const char*)> func = 0) {
 
   statusCallback = func;
 
@@ -97,6 +97,12 @@ void setup_wifi(std::function<void(char*)> func = 0) {
   bool needsSetup = false;
 
   WiFi.mode(WIFI_STA); // explicitly set mode, esp defaults to STA+AP
+  // Modem sleep (ESP8266 default) lets the radio doze between beacons. With many
+  // routers (e.g. FritzBox) incoming packets get delayed or lost and the first
+  // MQTT message after a quiet period seems to "wake up" the device.
+  WiFi.setSleepMode(WIFI_NONE_SLEEP);
+  WiFi.setAutoReconnect(true);
+  WiFi.persistent(true);
 
   EEPROM.begin(512);
   dumpEEPROMBuffer();
@@ -178,15 +184,27 @@ void setup_wifi(std::function<void(char*)> func = 0) {
   wm.addParameter( &param_mqtt_password );
   //wm.addParameter( &param_mqtt_topic );
 
+  // never block forever in the config portal (e.g. router not up yet after a
+  // power outage) - restart and try again instead
+  wm.setConfigPortalTimeout(WIFI_PORTAL_TIMEOUT_S);
+  wm.setConnectTimeout(30);
+
   if (needsSetup) {
     Serial.println("FIRST SETUP");
     if (statusCallback) statusCallback("use AP");
-    wm.startConfigPortal(devname);
+    if (!wm.startConfigPortal(devname)) {
+      Serial.println("Config portal timeout, restarting");
+      ESP.restart();
+    }
     if (statusCallback) statusCallback("WiFi ok");
   } else {
     Serial.println("REGULAR SETUP");
     if (statusCallback) statusCallback("WiFiManager");
-    wm.autoConnect(devname);          // just try. will automatically fall back to AP mode if necessary
+    // just try. will automatically fall back to AP mode if necessary
+    if (!wm.autoConnect(devname)) {
+      Serial.println("WiFi connect / portal timeout, restarting");
+      ESP.restart();
+    }
     if (statusCallback) statusCallback("WiFi ok");
   }
 
@@ -195,6 +213,9 @@ void setup_wifi(std::function<void(char*)> func = 0) {
   TelnetStream.begin();
   Serial.println((String)"All further logging is routed to telnet. Just connect to " + devname + " port 22.");
 #endif
+
+  WiFi.setSleepMode(WIFI_NONE_SLEEP);   // re-apply after (re)connect
+  ip = WiFi.localIP();
 
   LogTarget.println((String)"This device is called '" + devname + "'.");
   devname_lc = String(devname);
